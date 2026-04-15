@@ -1,11 +1,22 @@
-// Vercel KV — provisioned directly in the Vercel dashboard under Storage → KV.
-// Env vars (KV_REST_API_URL / KV_REST_API_TOKEN) are injected automatically
-// by Vercel; locally they won't exist, so every function falls back gracefully.
+// Upstash Redis — connect via Vercel marketplace (Storage → Upstash → Redis).
+// Vercel injects UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN automatically.
+// All functions fall back gracefully when those vars are absent (local dev).
 
-import { kv } from "@vercel/kv";
+import { Redis } from "@upstash/redis";
 
-function isConfigured(): boolean {
-  return !!(process.env.KV_REST_API_URL || process.env.KV_URL);
+let _client: Redis | null | undefined = undefined; // undefined = not yet checked
+
+function getClient(): Redis | null {
+  if (_client !== undefined) return _client;
+  const url   = process.env.UPSTASH_REDIS_REST_URL   ?? "";
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
+  if (!url || !token) { _client = null; return null; }
+  try {
+    _client = new Redis({ url, token });
+  } catch {
+    _client = null;
+  }
+  return _client;
 }
 
 const LB   = (gameId: string) => `lb:${gameId}`;
@@ -17,11 +28,12 @@ export async function submitScore(
   userId: string,
   score: number,
 ): Promise<{ isPersonalBest: boolean }> {
-  if (!isConfigured()) return { isPersonalBest: false };
+  const r = getClient();
+  if (!r) return { isPersonalBest: false };
   try {
-    const prev = await kv.zscore(LB(gameId), userId);
+    const prev = await r.zscore(LB(gameId), userId);
     if (prev !== null && Number(prev) >= score) return { isPersonalBest: false };
-    await kv.zadd(LB(gameId), { score, member: userId });
+    await r.zadd(LB(gameId), { score, member: userId });
     return { isPersonalBest: true };
   } catch {
     return { isPersonalBest: false };
@@ -33,9 +45,10 @@ export async function getTopScores(
   gameId: string,
   count = 10,
 ): Promise<Array<{ member: string; score: number }>> {
-  if (!isConfigured()) return [];
+  const r = getClient();
+  if (!r) return [];
   try {
-    const raw = await kv.zrange(LB(gameId), 0, count - 1, { rev: true, withScores: true });
+    const raw = await r.zrange(LB(gameId), 0, count - 1, { rev: true, withScores: true });
     if (!Array.isArray(raw)) return [];
     return (raw as Array<{ member: string; score: number }>).filter(
       (e) => e && typeof e === "object" && "member" in e,
@@ -50,9 +63,10 @@ export async function getUserRank(
   gameId: string,
   userId: string,
 ): Promise<number | null> {
-  if (!isConfigured()) return null;
+  const r = getClient();
+  if (!r) return null;
   try {
-    const rank = await kv.zrevrank(LB(gameId), userId);
+    const rank = await r.zrevrank(LB(gameId), userId);
     return rank === null ? null : rank + 1;
   } catch {
     return null;
@@ -64,10 +78,9 @@ export async function setUserDisplayName(
   userId: string,
   displayName: string,
 ): Promise<void> {
-  if (!isConfigured()) return;
-  try {
-    await kv.set(NAME(userId), displayName.slice(0, 24));
-  } catch {}
+  const r = getClient();
+  if (!r) return;
+  try { await r.set(NAME(userId), displayName.slice(0, 24)); } catch {}
 }
 
 /** Batch-fetch display names; falls back to truncated userId. */
@@ -75,9 +88,10 @@ export async function getDisplayNamesForUsers(
   userIds: string[],
 ): Promise<Record<string, string>> {
   if (userIds.length === 0) return {};
-  if (!isConfigured()) return Object.fromEntries(userIds.map((id) => [id, id.slice(0, 8)]));
+  const r = getClient();
+  if (!r) return Object.fromEntries(userIds.map((id) => [id, id.slice(0, 8)]));
   try {
-    const values = await kv.mget<(string | null)[]>(...userIds.map(NAME));
+    const values = await r.mget<(string | null)[]>(...userIds.map(NAME));
     return Object.fromEntries(
       userIds.map((id, i) => [id, values[i] ?? id.slice(0, 8)]),
     );
