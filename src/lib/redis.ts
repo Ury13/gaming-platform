@@ -1,38 +1,27 @@
-import { Redis } from "@upstash/redis";
+// Vercel KV — provisioned directly in the Vercel dashboard under Storage → KV.
+// Env vars (KV_REST_API_URL / KV_REST_API_TOKEN) are injected automatically
+// by Vercel; locally they won't exist, so every function falls back gracefully.
 
-let _client: Redis | null | undefined = undefined; // undefined = not yet initialized
+import { kv } from "@vercel/kv";
 
-function getClient(): Redis | null {
-  if (_client !== undefined) return _client;
-  const url   = process.env.UPSTASH_REDIS_REST_URL   ?? "";
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
-  if (!url || !token || url.startsWith("your_") || token.startsWith("your_")) {
-    _client = null;
-    return null;
-  }
-  try {
-    _client = new Redis({ url, token });
-  } catch {
-    _client = null;
-  }
-  return _client;
+function isConfigured(): boolean {
+  return !!(process.env.KV_REST_API_URL || process.env.KV_URL);
 }
 
 const LB   = (gameId: string) => `lb:${gameId}`;
 const NAME = (uid: string)    => `user:name:${uid}`;
 
-/** Submit a score; only persists if it's a personal best.  Returns whether it was. */
+/** Submit a score; only persists if it's a personal best. */
 export async function submitScore(
   gameId: string,
   userId: string,
   score: number,
 ): Promise<{ isPersonalBest: boolean }> {
-  const r = getClient();
-  if (!r) return { isPersonalBest: false };
+  if (!isConfigured()) return { isPersonalBest: false };
   try {
-    const prev = await r.zscore(LB(gameId), userId);
+    const prev = await kv.zscore(LB(gameId), userId);
     if (prev !== null && Number(prev) >= score) return { isPersonalBest: false };
-    await r.zadd(LB(gameId), { score, member: userId });
+    await kv.zadd(LB(gameId), { score, member: userId });
     return { isPersonalBest: true };
   } catch {
     return { isPersonalBest: false };
@@ -44,11 +33,9 @@ export async function getTopScores(
   gameId: string,
   count = 10,
 ): Promise<Array<{ member: string; score: number }>> {
-  const r = getClient();
-  if (!r) return [];
+  if (!isConfigured()) return [];
   try {
-    // @upstash/redis v1 returns [{member, score}] when withScores:true
-    const raw = await r.zrange(LB(gameId), 0, count - 1, { rev: true, withScores: true });
+    const raw = await kv.zrange(LB(gameId), 0, count - 1, { rev: true, withScores: true });
     if (!Array.isArray(raw)) return [];
     return (raw as Array<{ member: string; score: number }>).filter(
       (e) => e && typeof e === "object" && "member" in e,
@@ -63,10 +50,9 @@ export async function getUserRank(
   gameId: string,
   userId: string,
 ): Promise<number | null> {
-  const r = getClient();
-  if (!r) return null;
+  if (!isConfigured()) return null;
   try {
-    const rank = await r.zrevrank(LB(gameId), userId);
+    const rank = await kv.zrevrank(LB(gameId), userId);
     return rank === null ? null : rank + 1;
   } catch {
     return null;
@@ -78,10 +64,9 @@ export async function setUserDisplayName(
   userId: string,
   displayName: string,
 ): Promise<void> {
-  const r = getClient();
-  if (!r) return;
+  if (!isConfigured()) return;
   try {
-    await r.set(NAME(userId), displayName.slice(0, 24));
+    await kv.set(NAME(userId), displayName.slice(0, 24));
   } catch {}
 }
 
@@ -90,10 +75,9 @@ export async function getDisplayNamesForUsers(
   userIds: string[],
 ): Promise<Record<string, string>> {
   if (userIds.length === 0) return {};
-  const r = getClient();
-  if (!r) return Object.fromEntries(userIds.map((id) => [id, id.slice(0, 8)]));
+  if (!isConfigured()) return Object.fromEntries(userIds.map((id) => [id, id.slice(0, 8)]));
   try {
-    const values = await r.mget<(string | null)[]>(...userIds.map(NAME));
+    const values = await kv.mget<(string | null)[]>(...userIds.map(NAME));
     return Object.fromEntries(
       userIds.map((id, i) => [id, values[i] ?? id.slice(0, 8)]),
     );
