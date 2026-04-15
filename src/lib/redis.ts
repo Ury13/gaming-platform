@@ -1,15 +1,18 @@
 // Upstash Redis — connect via Vercel marketplace (Storage → Upstash → Redis).
-// Vercel injects UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN automatically.
-// All functions fall back gracefully when those vars are absent (local dev).
+// Handles both UPSTASH_* and KV_* env var names (Vercel injects either depending
+// on the integration version).
 
 import { Redis } from "@upstash/redis";
 
-let _client: Redis | null | undefined = undefined; // undefined = not yet checked
+let _client: Redis | null | undefined = undefined;
+
+function getUrl()   { return process.env.UPSTASH_REDIS_REST_URL   ?? process.env.KV_REST_API_URL   ?? ""; }
+function getToken() { return process.env.UPSTASH_REDIS_REST_TOKEN ?? process.env.KV_REST_API_TOKEN ?? ""; }
 
 function getClient(): Redis | null {
   if (_client !== undefined) return _client;
-  const url   = process.env.UPSTASH_REDIS_REST_URL   ?? "";
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN ?? "";
+  const url   = getUrl();
+  const token = getToken();
   if (!url || !token) { _client = null; return null; }
   try {
     _client = new Redis({ url, token });
@@ -17,6 +20,10 @@ function getClient(): Redis | null {
     _client = null;
   }
   return _client;
+}
+
+export function isConfigured() {
+  return !!(getUrl() && getToken());
 }
 
 const LB   = (gameId: string) => `lb:${gameId}`;
@@ -35,7 +42,8 @@ export async function submitScore(
     if (prev !== null && Number(prev) >= score) return { isPersonalBest: false };
     await r.zadd(LB(gameId), { score, member: userId });
     return { isPersonalBest: true };
-  } catch {
+  } catch (e) {
+    console.error("[redis] submitScore error:", e);
     return { isPersonalBest: false };
   }
 }
@@ -49,11 +57,21 @@ export async function getTopScores(
   if (!r) return [];
   try {
     const raw = await r.zrange(LB(gameId), 0, count - 1, { rev: true, withScores: true });
-    if (!Array.isArray(raw)) return [];
-    return (raw as Array<{ member: string; score: number }>).filter(
-      (e) => e && typeof e === "object" && "member" in e,
-    );
-  } catch {
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+
+    // @upstash/redis returns [{member, score}] objects when withScores:true.
+    // Guard against the flat [member, score, ...] format just in case.
+    if (typeof raw[0] === "object" && raw[0] !== null && "member" in (raw[0] as object)) {
+      return raw as Array<{ member: string; score: number }>;
+    }
+    // Flat alternating array fallback
+    const out: Array<{ member: string; score: number }> = [];
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      out.push({ member: String(raw[i]), score: Number(raw[i + 1]) });
+    }
+    return out;
+  } catch (e) {
+    console.error("[redis] getTopScores error:", e);
     return [];
   }
 }
@@ -83,10 +101,7 @@ export async function setUserDisplayName(
   try { await r.set(NAME(userId), displayName.slice(0, 24)); } catch {}
 }
 
-/**
- * Aggregate leaderboard — sums each player's best score across all games
- * and returns the top N. Computed on demand (6 × Redis calls in parallel).
- */
+/** Aggregate leaderboard — sums each player's best score across all games. */
 export async function getChampionsBoard(
   gameIds: string[],
   count = 10,

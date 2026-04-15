@@ -5,7 +5,7 @@ import { GAMES_META } from "@/lib/games";
 import { getOrCreateUserId } from "@/lib/identity";
 
 type Entry    = { rank: number; userId: string; name: string; score: number };
-type BoardData = { board: Entry[]; yourRank: number | null; yourScore: number | null };
+type BoardData = { configured: boolean; board: Entry[]; yourRank: number | null; yourScore: number | null };
 
 // "champions" is a virtual tab; real game ids come from GAMES_META
 type TabId = "champions" | typeof GAMES_META[number]["id"];
@@ -40,7 +40,7 @@ export default function LeaderboardPage() {
     fetch(`/api/leaderboard?game=${tab}&userId=${encodeURIComponent(uid)}`)
       .then((r) => r.json())
       .then((d: BoardData) => setData(d))
-      .catch(() => setData({ board: [], yourRank: null, yourScore: null }))
+      .catch(() => setData({ configured: false, board: [], yourRank: null, yourScore: null }))
       .finally(() => setLoading(false));
   }, []);
 
@@ -110,6 +110,21 @@ export default function LeaderboardPage() {
             Array.from({ length: 5 }).map((_, i) => (
               <div key={i} className="h-14 rounded-xl bg-white/5 animate-pulse" />
             ))
+          ) : data && !data.configured ? (
+            <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
+              <span className="text-4xl">🔌</span>
+              <p className="text-white/70 text-sm font-semibold">Database not connected</p>
+              <p className="text-white/40 text-xs leading-relaxed max-w-xs">
+                Go to your Vercel project → <strong>Storage</strong> → add <strong>Upstash Redis</strong> from the marketplace, then redeploy.
+              </p>
+              <a
+                href="/api/debug"
+                target="_blank"
+                className="text-xs text-blue-400 underline mt-1"
+              >
+                View connection diagnostics →
+              </a>
+            </div>
           ) : !data || data.board.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
               <span className="text-5xl opacity-60">{currentTab.emoji}</span>
