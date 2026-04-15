@@ -83,6 +83,33 @@ export async function setUserDisplayName(
   try { await r.set(NAME(userId), displayName.slice(0, 24)); } catch {}
 }
 
+/**
+ * Aggregate leaderboard — sums each player's best score across all games
+ * and returns the top N. Computed on demand (6 × Redis calls in parallel).
+ */
+export async function getChampionsBoard(
+  gameIds: string[],
+  count = 10,
+): Promise<Array<{ member: string; score: number }>> {
+  const r = getClient();
+  if (!r) return [];
+  try {
+    const perGame = await Promise.all(gameIds.map((id) => getTopScores(id, 200)));
+    const totals: Record<string, number> = {};
+    for (const entries of perGame) {
+      for (const e of entries) {
+        totals[e.member] = (totals[e.member] ?? 0) + e.score;
+      }
+    }
+    return Object.entries(totals)
+      .map(([member, score]) => ({ member, score }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, count);
+  } catch {
+    return [];
+  }
+}
+
 /** Batch-fetch display names; falls back to truncated userId. */
 export async function getDisplayNamesForUsers(
   userIds: string[],

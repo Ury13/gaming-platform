@@ -3,45 +3,46 @@
 import { useRef, useEffect, useCallback } from "react";
 import { getOrCreateUserId, getDisplayName } from "@/lib/identity";
 
-/**
- * Tracks the player's best score for a game session and submits it to the
- * leaderboard API on unmount (fire-and-forget, keepalive so it survives tab close).
- *
- * Usage:
- *   const { record } = useGameScore("match3");
- *   // call record(score) whenever the score changes — hook keeps the max
- */
+// Submit 8 s after the last scoring action — so the board updates while you
+// are still playing, not only when you navigate away.
+const DEBOUNCE_MS = 8_000;
+
 export function useGameScore(gameId: string) {
   const best      = useRef(0);
   const gameIdRef = useRef(gameId);
+  const timerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
   gameIdRef.current = gameId;
 
-  // Stable reference — useCallback with empty deps keeps identity across renders.
-  // Safe to include in effect dependency arrays without causing extra runs.
+  function doSubmit(score: number) {
+    if (score <= 0) return;
+    try {
+      const userId      = getOrCreateUserId();
+      const displayName = getDisplayName();
+      fetch("/api/score", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gameId: gameIdRef.current, userId, score, displayName }),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {}
+  }
+
+  // Stable reference — safe to put in effect dependency arrays.
   const record = useCallback((score: number) => {
-    if (score > best.current) best.current = score;
+    if (score <= best.current) return;
+    best.current = score;
+    // Debounced: fires 8 s after the last update.
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => doSubmit(score), DEBOUNCE_MS);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Also submit immediately on unmount (navigation / swipe away).
   useEffect(() => {
     return () => {
-      if (best.current <= 0) return;
-      try {
-        const userId      = getOrCreateUserId();
-        const displayName = getDisplayName();
-        fetch("/api/score", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            gameId:      gameIdRef.current,
-            userId,
-            score:       best.current,
-            displayName,
-          }),
-          keepalive: true,
-        }).catch(() => {});
-      } catch {}
+      if (timerRef.current) clearTimeout(timerRef.current);
+      doSubmit(best.current);
     };
-  }, []); // intentionally empty — runs only on unmount
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { record };
 }
